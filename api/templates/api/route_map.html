@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fuel Route Map</title>
+  <link href="https://unpkg.com/maplibre-gl@5.9.0/dist/maplibre-gl.css" rel="stylesheet">
+  <script src="https://unpkg.com/maplibre-gl@5.9.0/dist/maplibre-gl.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #18212f;
+      background: #eef1f5;
+    }
+
+    #map {
+      position: fixed;
+      inset: 0;
+    }
+
+    .panel {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      width: min(420px, calc(100vw - 32px));
+      max-height: calc(100vh - 32px);
+      overflow: auto;
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid #d8dee8;
+      border-radius: 8px;
+      box-shadow: 0 16px 40px rgba(21, 31, 47, 0.18);
+      padding: 16px;
+      z-index: 2;
+    }
+
+    h1 {
+      margin: 0 0 14px;
+      font-size: 20px;
+      line-height: 1.25;
+      font-weight: 700;
+    }
+
+    label {
+      display: block;
+      margin: 10px 0 6px;
+      font-size: 13px;
+      font-weight: 650;
+      color: #354155;
+    }
+
+    input {
+      width: 100%;
+      height: 40px;
+      border: 1px solid #c8d0dc;
+      border-radius: 6px;
+      padding: 0 10px;
+      font: inherit;
+      background: #fff;
+    }
+
+    button {
+      width: 100%;
+      height: 42px;
+      margin-top: 12px;
+      border: 0;
+      border-radius: 6px;
+      background: #1267d6;
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      background: #7f94b3;
+      cursor: wait;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid #d9e0ea;
+      border-radius: 6px;
+      background: #f8fafc;
+    }
+
+    .metric span {
+      display: block;
+      font-size: 11px;
+      color: #667285;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 3px;
+      font-size: 15px;
+      white-space: nowrap;
+    }
+
+    .stops {
+      margin: 14px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .stops li {
+      padding: 10px 0;
+      border-top: 1px solid #e0e5ed;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .stops strong {
+      display: block;
+      font-size: 14px;
+    }
+
+    .message {
+      margin-top: 12px;
+      font-size: 13px;
+      line-height: 1.4;
+      color: #4c596d;
+    }
+
+    .message.error {
+      color: #a32020;
+    }
+
+    .marker {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: 2px solid #fff;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .marker.start {
+      background: #14804a;
+    }
+
+    .marker.finish {
+      background: #b42318;
+    }
+
+    .marker.fuel {
+      background: #1267d6;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <section class="panel" aria-label="Route planner">
+    <h1>Fuel Route Map</h1>
+    <form id="route-form">
+      <label for="start">Start</label>
+      <input id="start" name="start" value="New York, NY" autocomplete="street-address" required>
+
+      <label for="finish">Finish</label>
+      <input id="finish" name="finish" value="Chicago, IL" autocomplete="street-address" required>
+
+      <button id="submit" type="submit">Show Route</button>
+    </form>
+    <div id="message" class="message"></div>
+    <div id="summary" class="summary" hidden></div>
+    <ol id="stops" class="stops"></ol>
+  </section>
+
+  <script>
+    const styleUrl = "{{ maptiler_style_url|escapejs }}";
+    const map = new maplibregl.Map({
+      container: "map",
+      style: styleUrl || "https://demotiles.maplibre.org/style.json",
+      center: [-98.5795, 39.8283],
+      zoom: 3
+    });
+
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
+
+    const markers = [];
+    const form = document.getElementById("route-form");
+    const button = document.getElementById("submit");
+    const message = document.getElementById("message");
+    const summary = document.getElementById("summary");
+    const stopsList = document.getElementById("stops");
+
+    function clearMap() {
+      for (const marker of markers) marker.remove();
+      markers.length = 0;
+
+      if (map.getLayer("route-line")) map.removeLayer("route-line");
+      if (map.getSource("route")) map.removeSource("route");
+    }
+
+    function markerElement(text, className) {
+      const element = document.createElement("div");
+      element.className = `marker ${className}`;
+      element.textContent = text;
+      return element;
+    }
+
+    function addMarker(lon, lat, text, className, popupText) {
+      const marker = new maplibregl.Marker({ element: markerElement(text, className) })
+        .setLngLat([lon, lat])
+        .setPopup(new maplibregl.Popup({ offset: 18 }).setHTML(popupText))
+        .addTo(map);
+      markers.push(marker);
+    }
+
+    function routeBounds(feature) {
+      const bounds = new maplibregl.LngLatBounds();
+      const geometry = feature.geometry;
+      const lines = geometry.type === "MultiLineString" ? geometry.coordinates : [geometry.coordinates];
+      for (const line of lines) {
+        for (const coord of line) bounds.extend(coord);
+      }
+      return bounds;
+    }
+
+    function drawRoute(data) {
+      clearMap();
+
+      map.addSource("route", {
+        type: "geojson",
+        data: data.route.geojson
+      });
+
+      map.addLayer({
+        id: "route-line",
+        type: "line",
+        source: "route",
+        paint: {
+          "line-color": "#1267d6",
+          "line-width": 5,
+          "line-opacity": 0.9
+        }
+      });
+
+      addMarker(
+        data.start.longitude,
+        data.start.latitude,
+        "S",
+        "start",
+        `<strong>Start</strong><br>${data.start.label}`
+      );
+      addMarker(
+        data.finish.longitude,
+        data.finish.latitude,
+        "F",
+        "finish",
+        `<strong>Finish</strong><br>${data.finish.label}`
+      );
+
+      data.fuel.stops.forEach((stop, index) => {
+        addMarker(
+          stop.longitude,
+          stop.latitude,
+          String(index + 1),
+          "fuel",
+          `<strong>${stop.name}</strong><br>${stop.city}, ${stop.state}<br>$${stop.retail_price_per_gallon}/gal`
+        );
+      });
+
+      map.fitBounds(routeBounds(data.route.geojson), {
+        padding: { top: 40, right: 40, bottom: 40, left: 460 },
+        maxZoom: 12
+      });
+    }
+
+    function renderSummary(data) {
+      summary.hidden = false;
+      summary.innerHTML = `
+        <div class="metric"><span>Miles</span><strong>${data.route.distance_miles.toLocaleString()}</strong></div>
+        <div class="metric"><span>Stops</span><strong>${data.fuel.stops.length}</strong></div>
+        <div class="metric"><span>Fuel</span><strong>$${data.fuel.total_spent.toLocaleString()}</strong></div>
+      `;
+
+      stopsList.innerHTML = "";
+      for (const stop of data.fuel.stops) {
+        const item = document.createElement("li");
+        item.innerHTML = `
+          <strong>${stop.name}</strong>
+          ${stop.city}, ${stop.state} · mile ${stop.route_mile} · $${stop.retail_price_per_gallon}/gal<br>
+          ${stop.fuel_needed_gallons} gal · $${stop.fuel_cost}
+        `;
+        stopsList.appendChild(item);
+      }
+    }
+
+    async function planRoute(start, finish) {
+      const response = await fetch("/api/route/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ start, finish })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Route planning failed.");
+      return data;
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      message.className = "message";
+      message.textContent = "Planning route...";
+
+      try {
+        const data = await planRoute(form.start.value, form.finish.value);
+        drawRoute(data);
+        renderSummary(data);
+        message.textContent = "Route ready.";
+      } catch (error) {
+        message.className = "message error";
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
